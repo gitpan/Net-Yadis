@@ -2,73 +2,150 @@
 
 use strict;
 use warnings;
-use Test::More tests => 34;
+use Test::More tests => 27;
 
 use Net::Yadis;
 
-warn "This test depends on the consistency of http://smoker.myopenid.com/ and http://netmesh.info/jernst\n";
+package testFetcher;
+
+use Test::More;
+use HTTP::Response;
+use LWP::UserAgent;
+sub new {
+    bless {realAgent => LWP::UserAgent->new}
+}
+
+my $GOOD_XRDS = '<?xml version="1.0" encoding="UTF-8"?>
+<xrds:XRDS
+    xmlns:xrds="xri://$xrds"
+    xmlns="xri://$xrd*($v*2.0)"
+    xmlns:openid="http://openid.net/xmlns/1.0">
+  <XRD>
+
+    <Service priority="10">
+      <Type>http://openid.net/signon/1.0</Type>
+    </Service>
+
+  </XRD>
+</xrds:XRDS>
+';
+my $HTML_PAGE = "<html><head></head><body>foo!</body></html>";
+my $HTML_EQUIV_PAGE = "<html><head><meta http-equiv='x-xrds-location' content='http://xrds.as.text/'></head><body>foo!</body></html>";
+my $HTML_EQUIV_COMPAT_PAGE = "<html><head><meta http-equiv='x-yadis-location' content='http://xrds.as.text/'></head><body>foo!</body></html>";
+
+sub get {
+    my $self = shift;
+    my $uri = shift;
+    my %headers = @_;
+
+    my $response = HTTP::Response->new;
+
+    if ($uri eq 'http://content.negotiation/') {
+        $response->code(200);
+        if($headers{'Accept'} eq 'application/xrds+xml') {
+            $response->header('Content-Type', 'application/xrds+xml');
+            $response->content($GOOD_XRDS);
+            $response->header('Content-Location', $uri);
+        }
+        else {
+            $response->header('Content-Type', 'text/plain');
+            $response->content("ERROR: yadis lib doesn't send accept header");
+            $response->header('Content-Location', $uri);
+        }
+    }
+    elsif ($uri eq 'http://http.header/') {
+        $response->code(200);
+        $response->header('X-XRDS-Location', 'http://xrds.as.text/');
+        $response->content($HTML_PAGE);
+        $response->header('Content-Location', $uri);
+    }
+    elsif ($uri eq 'http://http.equiv/') {
+        $response->code(200);
+        $response->content($HTML_EQUIV_PAGE);
+        $response->header('Content-Location', $uri);
+    }
+    elsif ($uri eq 'http://not.found/') {
+        $response->code(404);
+    }
+    elsif ($uri eq 'http://xrds.as.text/') {
+        $response->code(200);
+        $response->header('Content-Type', 'text/plain');
+        $response->content($GOOD_XRDS);
+        $response->header('Content-Location', $uri);
+    }
+    elsif ($uri eq 'http://network.error/') {
+        $response = $self->{realAgent}->get($uri);
+    }
+    elsif ($uri eq 'http://redirect.me/') {
+        $response->code(200);
+        $response->content($HTML_EQUIV_PAGE);
+        $response->header('Content-Location', 'http://redirect.ed/');
+    }
+    elsif ($uri eq 'http://http.compat.header/') {
+        $response->code(200);
+        $response->header('X-Yadis-Location', 'http://xrds.as.text/');
+        $response->content($HTML_PAGE);
+        $response->header('Content-Location', $uri);
+    }
+    elsif ($uri eq 'http://http.compat.equiv/') {
+        $response->code(200);
+        $response->content($HTML_EQUIV_COMPAT_PAGE);
+        $response->header('Content-Location', $uri);
+    }
+    return $response;
+}
+
+sub post {
+};
+
+package YadisTest;
+use Test::More;
+
+Net::Yadis::_userAgentClass('testFetcher');
 
 my ($yadis, $svc, $svb, @services, @types, @uris);
 
-eval {$yadis = Net::Yadis::discover('http://smoker.myopenid.com/');};
-isa_ok($yadis, "Net::Yadis", "Discover http://smoker.myopenid.com/")
-    or diag($@);
-@services = $yadis->services;
-is(@services, 1, "Smoker has just one service");
-$svc = $services[0];
-ok($svc->is_type("^http://openid.net/signon/"), "Smoker's service is OpenID");
+# discovery failures
+eval {$yadis = Net::Yadis->discover('http://network.error/');};
+ok($@, "Network error dies");
 
-@types = $svc->types;
-is(@types, 1, "Smoker's service has one type.");
-is($types[0], "http://openid.net/signon/1.0", 
-                    "Smoker's service is of type OpenID 1.0");
-                    
-is($svc->uri, "http://www.myopenid.com/server", "Smoker's OpenID server");
-is($svc->uri, undef, "Smoker has but one OpenID server URI");
+eval {$yadis = Net::Yadis->discover('http://not.found/');};
+ok($@, "404 dies");
 
-@uris = $svc->uris;
-is($uris[0], "http://www.myopenid.com/server", 
-                "Smoker's OpenID server (alternate method)");
-                
-is($svc->findTag("Delegate", 'http://openid.net/xmlns/1.0'),
-    "http://smoker.myopenid.com/", "Smoker's OpenID Delegate URL");
+eval {$yadis = Net::Yadis->discover('http://xrds.as.text/');};
+ok($@, "Not a Yadis URL dies");
 
-is($yadis->service_of_type("^http://openid.net/signon/"), $svc,
-            "Smoker's service of type OpenID");
+# discovery successes
+eval {$yadis = Net::Yadis->discover('http://content.negotiation/');};
+is($yadis->url, 'http://content.negotiation/',
+        "Content Negotiation correct yadis url");
+is($yadis->xrds_url, 'http://content.negotiation/',
+        "CN correct xrds URL");
+eval {$yadis = Net::Yadis->discover('http://http.header/');};
+is($yadis->url, 'http://http.header/',
+        "Http header correct yadis url");
+is($yadis->xrds_url, 'http://xrds.as.text/',
+        "header correct xrds URL");
+eval {$yadis = Net::Yadis->discover('http://http.equiv/');};
+print $@ if $@;
+is($yadis->url, 'http://http.equiv/',
+        "Http equiv correct yadis url");
+is($yadis->xrds_url, 'http://xrds.as.text/',
+        "equiv correct xrds URL");
+eval {$yadis = Net::Yadis->discover('http://http.compat.header/');};
+is($yadis->url, 'http://http.compat.header/',
+        "Http old header correct yadis url");
+is($yadis->xrds_url, 'http://xrds.as.text/',
+        "old header correct xrds URL");
+eval {$yadis = Net::Yadis->discover('http://http.compat.equiv/');};
+is($yadis->url, 'http://http.compat.equiv/',
+        "Http old equiv correct yadis url");
+is($yadis->xrds_url, 'http://xrds.as.text/',
+        "old equiv correct xrds URL");
+eval {$yadis = Net::Yadis->discover('http://redirect.me/');};
+is($yadis->url, 'http://redirect.ed/',
+        "yadis url follows redirects");
 
-is($yadis->service_of_type("^http://openid.net/signon/"), undef,
-            "Smoker's second service of type OpenID is undefined");
-
-eval{$yadis = Net::Yadis::discover('http://netmesh.info/jernst');};
-isa_ok($yadis, "Net::Yadis", "Discover http://netmesh.info/jernst")
-    or diag($@);
-
-@services = $yadis->services;
-is(@services, 7, "Johannes has 7 services");
-
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/sso");
-ok($svc->is_type("http://lid.netmesh.org/sso/2.0b5"), 
-                        "Johannes has LID sso 2.0b5");
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/sso");
-is($svc, undef, "Johannes has just one LID sso service");
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/2");
-ok($svc->is_type("http://lid.netmesh.org/2.0b5"), 
-                        "Johannes has LID 2.0b5");
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/post/r");
-ok($svc->is_type("http://lid.netmesh.org/post/receiver/2.0b5"), 
-                        "Johannes has LID post reciever 2.0b5");
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/format");
-ok($svc->is_type("http://lid.netmesh.org/format-negotiation/2.0b5"), 
-                        "Johannes has LID format negotiation 2.0b5");
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/trav");
-ok($svc->is_type("http://lid.netmesh.org/traversal/2.0b5"), 
-                        "Johannes has LID traversal 2.0b5");
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/post/s");
-ok($svc->is_type("http://lid.netmesh.org/post/sender/2.0b5"), 
-                        "Johannes has LID post sender 2.0b5");
-$svc = $yadis->service_of_type("^http://lid.netmesh.org/rely");
-ok($svc->is_type("http://lid.netmesh.org/relying-party/2.0b5"), 
-                        "Johannes has LID relying party 2.0b5");
 
 
 # test prioritizing and getting attributes of tags in the service
@@ -123,7 +200,7 @@ is($svc->uri, "http://www.myopenid.com/servor", "foobar.voodoo.com svc 2 URI 1")
 is($svc->uri, "http://www.myopenid.com/server", "foobar.voodoo.com svc 2 URI 2");
 is($svc->uri, "http://www.myopenid.com/servir", "foobar.voodoo.com svc 2 URI 3");
 is($svc->uri, undef, "foobar.voodoo.com svc 2 has 3 URIs");
-my ($contents, $attrs) = $svc->findTag("junk");
+($contents, $attrs) = $svc->findTag("junk");
 is($contents, "Ton Cents", "foobar.voodoo.com svc 2 findTag junk contents");
 is($svc->getAttribute("priority"), "10", "svc->getAttribute still works");
 
